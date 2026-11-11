@@ -1,10 +1,14 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { businessAccounts, externalRecords, ledgerEntries, reconciliationActions } from "@/lib/db/schema";
+import { requireRoles } from "@/lib/auth";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function POST(request: Request) {
+  const denied = await requireRoles(["operations"]);
+  if (denied) return denied;
+
   const headerKey = request.headers.get("Idempotency-Key")?.trim();
   if (!headerKey || headerKey.length > 176) {
     return Response.json({ error: "Provide an Idempotency-Key header (up to 176 characters)." }, { status: 400 });
@@ -31,13 +35,16 @@ export async function POST(request: Request) {
     return Response.json({ error: "externalRecordId must be a valid UUID." }, { status: 400 });
   }
 
+  const accountId = input.accountId as string;
+  const amountCents = input.amountCents as number;
+  const reason = (input.reason as string).trim();
+  const externalRecordId = input.externalRecordId as string | undefined;
   const idempotencyKey = `ops:${headerKey}`;
-  const reason = input.reason.trim();
   const result = await db.transaction(async (tx) => {
     const [account] = await tx
       .select({ id: businessAccounts.id })
       .from(businessAccounts)
-      .where(and(eq(businessAccounts.id, input.accountId), eq(businessAccounts.active, true)))
+      .where(and(eq(businessAccounts.id, accountId), eq(businessAccounts.active, true)))
       .for("update")
       .limit(1);
     if (!account) return { error: "Account not found.", status: 404 as const };
@@ -54,19 +61,19 @@ export async function POST(request: Request) {
         .where(and(eq(reconciliationActions.ledgerEntryId, existing.id), eq(reconciliationActions.action, "correction")))
         .limit(1);
       const sameReason = existing.description === `Operations correction: ${reason}`.slice(0, 240);
-      const sameExternalRecord = (existingAction?.externalRecordId ?? undefined) === input.externalRecordId;
-      if (existing.accountId !== input.accountId || existing.type !== "correction" || existing.amountCents !== input.amountCents || !sameReason || !sameExternalRecord) {
+      const sameExternalRecord = (existingAction?.externalRecordId ?? undefined) === externalRecordId;
+      if (existing.accountId !== accountId || existing.type !== "correction" || existing.amountCents !== amountCents || !sameReason || !sameExternalRecord) {
         return { error: "Idempotency key already belongs to a different correction.", status: 409 as const };
       }
       return { entry: existing, duplicate: true, status: 200 as const };
     }
 
     let linkedExternalRecordId: string | undefined;
-    if (input.externalRecordId) {
+    if (externalRecordId) {
       const [record] = await tx
         .select({ id: externalRecords.id })
         .from(externalRecords)
-        .where(and(eq(externalRecords.id, input.externalRecordId), eq(externalRecords.accountId, input.accountId)))
+        .where(and(eq(externalRecords.id, externalRecordId), eq(externalRecords.accountId, accountId)))
         .limit(1);
       if (!record) return { error: "External record not found for this account.", status: 404 as const };
       linkedExternalRecordId = record.id;
@@ -75,20 +82,20 @@ export async function POST(request: Request) {
     const [entry] = await tx
       .insert(ledgerEntries)
       .values({
-        accountId: input.accountId,
+        accountId,
         type: "correction",
-        amountCents: input.amountCents,
+        amountCents,
         description: `Operations correction: ${reason}`.slice(0, 240),
         idempotencyKey,
       })
       .returning();
 
     await tx.insert(reconciliationActions).values({
-      accountId: input.accountId,
+      accountId,
       action: "correction",
       externalRecordId: linkedExternalRecordId,
       ledgerEntryId: entry.id,
-      amountCents: input.amountCents,
+      amountCents,
       reason,
     });
 

@@ -2,6 +2,8 @@
 
 The API is served by Next.js Route Handlers under `/api`. Amounts are integers in cents. Ledger credits are positive and debits are negative. Dates are ISO 8601 strings.
 
+All account and operations routes require a signed-in session. Account and card/payment routes require the `owner` role. Reconciliation and correction routes require the `operations` role. `GET /api/accounts` is available to both roles. See [authentication.md](./authentication.md) for the local demo credentials and Vercel setup.
+
 ## Accounts and balances
 
 | Method and path | Purpose |

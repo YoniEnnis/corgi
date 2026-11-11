@@ -1,16 +1,24 @@
 import { db } from "@/lib/db";
 import { businessAccounts, cards } from "@/lib/db/schema";
+import { requireRoles } from "@/lib/auth";
+import { eq } from "drizzle-orm";
 
 export async function GET() {
+  const denied = await requireRoles(["owner", "operations"]);
+  if (denied) return denied;
+
   const accounts = await db
     .select({ id: businessAccounts.id, name: businessAccounts.name, currency: businessAccounts.currency })
     .from(businessAccounts)
-    .where(businessAccounts.active);
+    .where(eq(businessAccounts.active, true));
 
   return Response.json({ accounts });
 }
 
 export async function POST(request: Request) {
+  const denied = await requireRoles(["owner"]);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await request.json();

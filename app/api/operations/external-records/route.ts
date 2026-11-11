@@ -1,10 +1,14 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { businessAccounts, externalRecords } from "@/lib/db/schema";
+import { requireRoles } from "@/lib/auth";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function POST(request: Request) {
+  const denied = await requireRoles(["operations"]);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await request.json();

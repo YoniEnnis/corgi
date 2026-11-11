@@ -1,11 +1,15 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { businessAccounts, cardHolds, ledgerEntries, outboundPayments } from "@/lib/db/schema";
+import { requireRoles } from "@/lib/auth";
 
 type RouteProps = { params: Promise<{ accountId: string }> };
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function GET(_request: Request, { params }: RouteProps) {
+  const denied = await requireRoles(["owner"]);
+  if (denied) return denied;
+
   const { accountId } = await params;
   if (!uuidPattern.test(accountId)) return Response.json({ error: "Invalid account ID." }, { status: 400 });
 
@@ -19,6 +23,9 @@ export async function GET(_request: Request, { params }: RouteProps) {
 }
 
 export async function POST(request: Request, { params }: RouteProps) {
+  const denied = await requireRoles(["owner"]);
+  if (denied) return denied;
+
   const { accountId } = await params;
   if (!uuidPattern.test(accountId)) return Response.json({ error: "Invalid account ID." }, { status: 400 });
 
@@ -41,6 +48,8 @@ export async function POST(request: Request, { params }: RouteProps) {
   if (typeof input.amountCents !== "number" || !Number.isSafeInteger(input.amountCents) || input.amountCents <= 0) {
     return Response.json({ error: "amountCents must be a positive integer." }, { status: 400 });
   }
+  const recipient = input.recipient.trim();
+  const amountCents = input.amountCents;
 
   const result = await db.transaction(async (tx) => {
     const [account] = await tx
@@ -57,7 +66,7 @@ export async function POST(request: Request, { params }: RouteProps) {
       .where(eq(outboundPayments.idempotencyKey, idempotencyKey))
       .limit(1);
     if (existing) {
-      if (existing.accountId !== accountId || existing.amountCents !== input.amountCents || existing.recipient !== input.recipient.trim()) {
+      if (existing.accountId !== accountId || existing.amountCents !== amountCents || existing.recipient !== recipient) {
         return { error: "Idempotency key already belongs to a different payment request.", status: 409 as const };
       }
       return { payment: existing, duplicate: true, status: 200 as const };
@@ -73,18 +82,18 @@ export async function POST(request: Request, { params }: RouteProps) {
       })
       .from(businessAccounts)
       .where(eq(businessAccounts.id, accountId));
-    if (!totals || totals.availableCents < input.amountCents) {
+    if (!totals || totals.availableCents < amountCents) {
       return { error: "Insufficient available funds.", availableBalanceCents: totals?.availableCents ?? 0, status: 409 as const };
     }
 
     const [payment] = await tx
       .insert(outboundPayments)
-      .values({ accountId, recipient: input.recipient.trim(), amountCents: input.amountCents, idempotencyKey })
+      .values({ accountId, recipient, amountCents, idempotencyKey })
       .onConflictDoNothing()
       .returning();
     if (!payment) {
       const [racedPayment] = await tx.select().from(outboundPayments).where(eq(outboundPayments.idempotencyKey, idempotencyKey)).limit(1);
-      if (!racedPayment || racedPayment.accountId !== accountId || racedPayment.amountCents !== input.amountCents || racedPayment.recipient !== input.recipient.trim()) {
+      if (!racedPayment || racedPayment.accountId !== accountId || racedPayment.amountCents !== amountCents || racedPayment.recipient !== recipient) {
         return { error: "Idempotency key already belongs to a different payment request.", status: 409 as const };
       }
       return { payment: racedPayment, duplicate: true, status: 200 as const };

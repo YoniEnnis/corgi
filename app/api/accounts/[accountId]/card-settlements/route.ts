@@ -1,11 +1,15 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { businessAccounts, cardHolds, ledgerEntries, outboundPayments, processedEvents } from "@/lib/db/schema";
+import { requireRoles } from "@/lib/auth";
 
 type RouteProps = { params: Promise<{ accountId: string }> };
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function POST(request: Request, { params }: RouteProps) {
+  const denied = await requireRoles(["owner"]);
+  if (denied) return denied;
+
   const { accountId } = await params;
   if (!uuidPattern.test(accountId)) return Response.json({ error: "Invalid account ID." }, { status: 400 });
 
@@ -30,9 +34,11 @@ export async function POST(request: Request, { params }: RouteProps) {
     return Response.json({ error: "externalEventId must be between 1 and 180 characters." }, { status: 400 });
   }
 
+  const holdId = input.holdId as string;
+  const amountCents = input.amountCents as number;
   const provider = input.provider.trim();
   const externalEventId = input.externalEventId.trim();
-  const payload = { accountId, holdId: input.holdId, amountCents: input.amountCents };
+  const payload = { accountId, holdId, amountCents };
 
   const result = await db.transaction(async (tx) => {
     const [account] = await tx
@@ -56,8 +62,8 @@ export async function POST(request: Request, { params }: RouteProps) {
 
       const previousPayload = previousEvent.payload as typeof payload;
       const payloadMatches = previousPayload.accountId === accountId
-        && previousPayload.holdId === input.holdId
-        && previousPayload.amountCents === input.amountCents;
+        && previousPayload.holdId === holdId
+        && previousPayload.amountCents === amountCents;
       return payloadMatches
         ? { duplicate: true, payloadMatches, eventId: previousEvent.id, status: 200 as const }
         : { error: "This provider event ID was already used for different settlement details.", duplicate: true, payloadMatches, status: 409 as const };
@@ -66,7 +72,7 @@ export async function POST(request: Request, { params }: RouteProps) {
     const [hold] = await tx
       .select()
       .from(cardHolds)
-      .where(and(eq(cardHolds.id, input.holdId), eq(cardHolds.accountId, accountId)))
+      .where(and(eq(cardHolds.id, holdId), eq(cardHolds.accountId, accountId)))
       .for("update")
       .limit(1);
     if (!hold) return { error: "Card authorization not found.", status: 404 as const };
@@ -83,7 +89,7 @@ export async function POST(request: Request, { params }: RouteProps) {
       .from(businessAccounts)
       .where(eq(businessAccounts.id, accountId));
 
-    const availableAfterSettlement = (totals?.availableCents ?? 0) + hold.amountCents - input.amountCents;
+    const availableAfterSettlement = (totals?.availableCents ?? 0) + hold.amountCents - amountCents;
     if (availableAfterSettlement < 0) {
       return { error: "Settlement exceeds the hold and remaining available funds.", status: 409 as const };
     }
@@ -107,8 +113,8 @@ export async function POST(request: Request, { params }: RouteProps) {
         .where(eq(processedEvents.id, racedEvent.id));
       const racedPayload = racedEvent.payload as typeof payload;
       const payloadMatches = racedPayload.accountId === accountId
-        && racedPayload.holdId === input.holdId
-        && racedPayload.amountCents === input.amountCents;
+        && racedPayload.holdId === holdId
+        && racedPayload.amountCents === amountCents;
       return payloadMatches
         ? { duplicate: true, payloadMatches, eventId: racedEvent.id, status: 200 as const }
         : { error: "This provider event ID was already used for different settlement details.", duplicate: true, payloadMatches, status: 409 as const };
@@ -119,7 +125,7 @@ export async function POST(request: Request, { params }: RouteProps) {
       .values({
         accountId,
         type: "card_settlement",
-        amountCents: -input.amountCents,
+        amountCents: -amountCents,
         description: `${hold.merchant} card purchase settled`,
         idempotencyKey: `provider-event:${event.id}`,
       })
@@ -127,7 +133,7 @@ export async function POST(request: Request, { params }: RouteProps) {
 
     const [updatedHold] = await tx
       .update(cardHolds)
-      .set({ status: "settled", settledAmountCents: input.amountCents, settlementEntryId: entry.id, closedAt: new Date() })
+      .set({ status: "settled", settledAmountCents: amountCents, settlementEntryId: entry.id, closedAt: new Date() })
       .where(eq(cardHolds.id, hold.id))
       .returning();
 

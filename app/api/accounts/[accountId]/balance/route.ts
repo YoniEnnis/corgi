@@ -1,6 +1,7 @@
 import { and, eq, lte, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { businessAccounts, cardHolds, ledgerEntries, outboundPayments } from "@/lib/db/schema";
+import { requireRoles } from "@/lib/auth";
 
 type RouteProps = { params: Promise<{ accountId: string }> };
 
@@ -10,6 +11,9 @@ async function total(query: PromiseLike<Array<{ amount: number }>>) {
 }
 
 export async function GET(_request: Request, { params }: RouteProps) {
+  const denied = await requireRoles(["owner"]);
+  if (denied) return denied;
+
   const { accountId } = await params;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(accountId)) {
     return Response.json({ error: "Invalid account ID." }, { status: 400 });

@@ -1,11 +1,15 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { businessAccounts, ledgerEntries, outboundPayments, processedEvents } from "@/lib/db/schema";
+import { requireRoles } from "@/lib/auth";
 
 type RouteProps = { params: Promise<{ accountId: string; paymentId: string }> };
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function POST(request: Request, { params }: RouteProps) {
+  const denied = await requireRoles(["owner"]);
+  if (denied) return denied;
+
   const { accountId, paymentId } = await params;
   if (!uuidPattern.test(accountId) || !uuidPattern.test(paymentId)) {
     return Response.json({ error: "Invalid account or payment ID." }, { status: 400 });

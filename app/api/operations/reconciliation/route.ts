@@ -1,12 +1,16 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { businessAccounts, externalRecords, ledgerEntries, reconciliationActions } from "@/lib/db/schema";
+import { requireRoles } from "@/lib/auth";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const sameWindow = (left: Date, right: Date, hours: number) => Math.abs(left.getTime() - right.getTime()) <= hours * 60 * 60 * 1000;
 const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 export async function GET(request: Request) {
+  const denied = await requireRoles(["operations"]);
+  if (denied) return denied;
+
   const accountId = new URL(request.url).searchParams.get("accountId");
   if (!accountId || !uuidPattern.test(accountId)) {
     return Response.json({ error: "Provide a valid accountId query parameter." }, { status: 400 });

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 type Account = { id: string; name: string; currency: string };
+type AuthUser = { email: string; role: "owner" | "operations" };
 type Balance = {
   recordedBalanceCents: number;
   availableBalanceCents: number;
@@ -87,6 +88,10 @@ function dateTime(value: string) {
 }
 
 export default function Dashboard() {
+  const [session, setSession] = useState<AuthUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState("");
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState("");
   const [balance, setBalance] = useState<Balance | null>(null);
@@ -95,6 +100,7 @@ export default function Dashboard() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [reconciliation, setReconciliation] = useState<Reconciliation | null>(null);
   const [view, setView] = useState<"owner" | "operations">("owner");
+  const [showCreateAccount, setShowCreateAccount] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -110,6 +116,41 @@ export default function Dashboard() {
       setAccountId((current) => current || data.accounts[0]?.id || "");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not load accounts.");
+    }
+  }
+
+  async function signIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setLoginBusy(true);
+    setLoginError("");
+    try {
+      const result = await api<{ user: AuthUser }>("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: form.get("email"), password: form.get("password") }),
+      });
+      setSession(result.user);
+      setView(result.user.role);
+    } catch (cause) {
+      setLoginError(cause instanceof Error ? cause.message : "Sign-in failed.");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  async function signOut() {
+    try {
+      await api("/api/auth/logout", { method: "POST" });
+      setSession(null);
+      setAccounts([]);
+      setAccountId("");
+      setBalance(null);
+      setEntries([]);
+      setHolds([]);
+      setPayments([]);
+      setReconciliation(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Sign-out failed.");
     }
   }
 
@@ -131,7 +172,24 @@ export default function Dashboard() {
     setReconciliation(data);
   }
 
-  useEffect(() => { void loadAccounts(); }, []);
+  useEffect(() => {
+    let active = true;
+    api<{ user: AuthUser | null }>("/api/auth/session")
+      .then((data) => {
+        if (!active) return;
+        setSession(data.user);
+        if (data.user) setView(data.user.role);
+      })
+      .catch((cause) => {
+        if (active) setLoginError(cause instanceof Error ? cause.message : "Could not check sign-in status.");
+      })
+      .finally(() => { if (active) setAuthReady(true); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (authReady && session) void loadAccounts();
+  }, [authReady, session]);
 
   useEffect(() => {
     if (!accountId) {
@@ -142,13 +200,20 @@ export default function Dashboard() {
       setReconciliation(null);
       return;
     }
-    void refreshAccountData().catch((cause) => setError(cause instanceof Error ? cause.message : "Could not load account."));
-    void refreshReconciliation().catch(() => setReconciliation(null));
-  }, [accountId]);
+    if (session?.role === "owner") {
+      void refreshAccountData().catch((cause) => setError(cause instanceof Error ? cause.message : "Could not load account."));
+    } else {
+      setBalance(null);
+      setEntries([]);
+      setHolds([]);
+      setPayments([]);
+      void refreshReconciliation().catch(() => setReconciliation(null));
+    }
+  }, [accountId, session]);
 
   async function refreshAll() {
-    await refreshAccountData();
-    await refreshReconciliation();
+    if (session?.role === "owner") await refreshAccountData();
+    else await refreshReconciliation();
   }
 
   async function submit(action: () => Promise<void>, successMessage: string) {
@@ -174,6 +239,7 @@ export default function Dashboard() {
       const data = await api<{ account: Account }>("/api/accounts", { method: "POST", body: JSON.stringify({ name }) });
       setAccounts((current) => [...current, data.account]);
       setAccountId(data.account.id);
+      setShowCreateAccount(false);
       formElement.reset();
     }, "Business account created.");
   }
@@ -358,14 +424,19 @@ export default function Dashboard() {
 
   const currency = account?.currency ?? "USD";
 
+  if (!authReady) {
+    return <main className="sign-in-shell"><p>Checking sign-in…</p></main>;
+  }
+
+  if (!session) {
+    return <SignInForm onSubmit={signIn} busy={loginBusy} error={loginError} />;
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
         <a className="brand" href="#home">Morrow</a>
-        <nav className="view-switch" aria-label="Choose workspace">
-          <button className={view === "owner" ? "selected" : ""} onClick={() => setView("owner")}>Business owner</button>
-          <button className={view === "operations" ? "selected" : ""} onClick={() => setView("operations")}>Operations</button>
-        </nav>
+        <div className="role-label">{session.role === "owner" ? "Business owner" : "Operations reviewer"}</div>
         <div className="account-select">
           <label htmlFor="account-select">Account</label>
           {accounts.length > 0 ? (
@@ -373,7 +444,9 @@ export default function Dashboard() {
               {accounts.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
             </select>
           ) : <span>No account yet</span>}
+          {accounts.length > 0 && session.role === "owner" && <button className="button secondary" onClick={() => setShowCreateAccount((current) => !current)}>{showCreateAccount ? "Cancel" : "New account"}</button>}
         </div>
+        <div className="user-actions"><span>{session.email}</span><button className="button plain" onClick={() => void signOut()}>Sign out</button></div>
       </header>
 
       <div className="page-content">
@@ -389,7 +462,7 @@ export default function Dashboard() {
         {error && <div className="message error" role="alert">{error}</div>}
         {notice && <div className="message success" role="status">{notice}</div>}
 
-        {!account && accounts.length === 0 ? (
+        {!account && accounts.length === 0 && session.role === "owner" ? (
           <section className="panel setup-panel">
             <h2>Open a business account</h2>
             <p>Create the demo account to start adding funds and recording activity.</p>
@@ -398,7 +471,19 @@ export default function Dashboard() {
               <button className="button primary" disabled={busy}>Create account</button>
             </form>
           </section>
-        ) : view === "owner" ? (
+        ) : !account && accounts.length === 0 ? (
+          <section className="panel setup-panel"><h2>No business accounts</h2><p>There are no accounts available to review yet.</p></section>
+        ) : (
+          <>
+            {showCreateAccount && <section className="panel create-account-panel">
+              <h2>Create a business account</h2>
+              <p>The new account will start with a zero balance and one demo card.</p>
+              <form className="inline-form" onSubmit={createAccount}>
+                <label>Business name<input name="name" placeholder="Another Business" required minLength={2} maxLength={120} /></label>
+                <button className="button primary" disabled={busy}>Create account</button>
+              </form>
+            </section>}
+            {view === "owner" ? (
           <>
             <section className="balance-grid">
               <article className="balance-card main-balance">
@@ -483,7 +568,7 @@ export default function Dashboard() {
               )}
             </section>
           </>
-        ) : (
+            ) : (
           <>
             <section className="summary-grid">
               <Summary label="External records" value={reconciliation?.summary.externalRecords ?? "—"} />
@@ -535,6 +620,8 @@ export default function Dashboard() {
               {reconciliation?.internalOnly.length ? <div className="table-wrap"><table><thead><tr><th>Description</th><th>Amount</th><th>Date</th></tr></thead><tbody>{reconciliation.internalOnly.map((entry) => <tr key={entry.id}><td>{entry.description}</td><td>{dollars(entry.amountCents, currency)}</td><td>{dateTime(entry.createdAt)}</td></tr>)}</tbody></table></div> : <p className="empty-state">No unmatched ledger entries.</p>}
             </section>
           </>
+            )}
+          </>
         )}
       </div>
     </main>
@@ -543,4 +630,21 @@ export default function Dashboard() {
 
 function Summary({ label, value }: { label: string; value: number | string }) {
   return <div className="summary-card"><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function SignInForm({ onSubmit, busy, error }: { onSubmit: (event: FormEvent<HTMLFormElement>) => void; busy: boolean; error: string }) {
+  return (
+    <main className="sign-in-shell">
+      <form className="panel sign-in-panel" onSubmit={onSubmit}>
+        <a className="brand" href="#home">Morrow</a>
+        <h1>Sign in</h1>
+        <p>Sign in with your business owner or operations account.</p>
+        {error && <div className="message error" role="alert">{error}</div>}
+        <label>Email<input type="email" name="email" autoComplete="username" required /></label>
+        <label>Password<input type="password" name="password" autoComplete="current-password" required /></label>
+        <button className="button primary" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+        {process.env.NODE_ENV === "development" && <div className="demo-logins"><strong>Local demo accounts</strong><span>Owner: owner@example.test / Owner-demo-123!</span><span>Operations: ops@example.test / Ops-demo-123!</span></div>}
+      </form>
+    </main>
+  );
 }

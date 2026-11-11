@@ -1,10 +1,14 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { businessAccounts, externalRecords, ledgerEntries, reconciliationActions } from "@/lib/db/schema";
+import { requireRoles } from "@/lib/auth";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function POST(request: Request) {
+  const denied = await requireRoles(["operations"]);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -22,11 +26,15 @@ export async function POST(request: Request) {
     return Response.json({ error: "reason must be between 3 and 500 characters." }, { status: 400 });
   }
 
+  const accountId = input.accountId as string;
+  const externalRecordId = input.externalRecordId as string;
+  const ledgerEntryId = input.ledgerEntryId as string;
+  const reason = (input.reason as string).trim();
   const result = await db.transaction(async (tx) => {
     const [account] = await tx
       .select({ id: businessAccounts.id, currency: businessAccounts.currency })
       .from(businessAccounts)
-      .where(and(eq(businessAccounts.id, input.accountId), eq(businessAccounts.active, true)))
+      .where(and(eq(businessAccounts.id, accountId), eq(businessAccounts.active, true)))
       .for("update")
       .limit(1);
     if (!account) return { error: "Account not found.", status: 404 as const };
@@ -34,7 +42,7 @@ export async function POST(request: Request) {
     const [record] = await tx
       .select()
       .from(externalRecords)
-      .where(and(eq(externalRecords.id, input.externalRecordId), eq(externalRecords.accountId, input.accountId)))
+      .where(and(eq(externalRecords.id, externalRecordId), eq(externalRecords.accountId, accountId)))
       .for("update")
       .limit(1);
     if (!record) return { error: "External record not found for this account.", status: 404 as const };
@@ -43,14 +51,14 @@ export async function POST(request: Request) {
     const [entry] = await tx
       .select()
       .from(ledgerEntries)
-      .where(and(eq(ledgerEntries.id, input.ledgerEntryId), eq(ledgerEntries.accountId, input.accountId)))
+      .where(and(eq(ledgerEntries.id, ledgerEntryId), eq(ledgerEntries.accountId, accountId)))
       .limit(1);
     if (!entry) return { error: "Ledger entry not found for this account.", status: 404 as const };
 
     await tx.update(externalRecords).set({ matchedLedgerEntryId: entry.id }).where(eq(externalRecords.id, record.id));
     const [action] = await tx
       .insert(reconciliationActions)
-      .values({ accountId: input.accountId, action: "manual_match", externalRecordId: record.id, ledgerEntryId: entry.id, reason: input.reason.trim() })
+      .values({ accountId, action: "manual_match", externalRecordId: record.id, ledgerEntryId: entry.id, reason })
       .returning();
 
     return {
