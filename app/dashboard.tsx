@@ -27,6 +27,7 @@ type CardHold = {
   settledAmountCents: number | null;
   status: "open" | "settled" | "released";
   reversed: boolean;
+  externalAuthId: string;
   createdAt: string;
 };
 type Payment = {
@@ -60,6 +61,7 @@ type Reconciliation = {
   externalRecords: ReconciliationRow[];
   internalOnly: LedgerEntry[];
 };
+type ProviderEvent = { id: string; type: string; deliveryCount: number; firstReceivedAt: string; lastReceivedAt: string };
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -98,7 +100,9 @@ export default function Dashboard() {
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
   const [holds, setHolds] = useState<CardHold[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [stripeConfigured, setStripeConfigured] = useState(false);
   const [reconciliation, setReconciliation] = useState<Reconciliation | null>(null);
+  const [providerEvents, setProviderEvents] = useState<ProviderEvent[]>([]);
   const [view, setView] = useState<"owner" | "operations">("owner");
   const [showCreateAccount, setShowCreateAccount] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -148,7 +152,9 @@ export default function Dashboard() {
       setEntries([]);
       setHolds([]);
       setPayments([]);
+      setStripeConfigured(false);
       setReconciliation(null);
+      setProviderEvents([]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Sign-out failed.");
     }
@@ -158,18 +164,23 @@ export default function Dashboard() {
     if (!id) return;
     const [balanceData, activityData] = await Promise.all([
       api<{ balances: Balance }>(`/api/accounts/${id}/balance`),
-      api<{ entries: LedgerEntry[]; cardHolds: CardHold[]; payments: Payment[] }>(`/api/accounts/${id}/activity`),
+      api<{ entries: LedgerEntry[]; cardHolds: CardHold[]; payments: Payment[]; stripeConfigured: boolean }>(`/api/accounts/${id}/activity`),
     ]);
     setBalance(balanceData.balances);
     setEntries(activityData.entries);
     setHolds(activityData.cardHolds);
     setPayments(activityData.payments);
+    setStripeConfigured(activityData.stripeConfigured);
   }
 
   async function refreshReconciliation(id = accountId) {
     if (!id) return;
-    const data = await api<Reconciliation>(`/api/operations/reconciliation?accountId=${id}`);
+    const [data, eventData] = await Promise.all([
+      api<Reconciliation>(`/api/operations/reconciliation?accountId=${id}`),
+      api<{ events: ProviderEvent[] }>(`/api/operations/provider-events?accountId=${id}`),
+    ]);
     setReconciliation(data);
+    setProviderEvents(eventData.events);
   }
 
   useEffect(() => {
@@ -197,7 +208,9 @@ export default function Dashboard() {
       setEntries([]);
       setHolds([]);
       setPayments([]);
+      setStripeConfigured(false);
       setReconciliation(null);
+      setProviderEvents([]);
       return;
     }
     if (session?.role === "owner") {
@@ -207,6 +220,7 @@ export default function Dashboard() {
       setEntries([]);
       setHolds([]);
       setPayments([]);
+      setProviderEvents([]);
       void refreshReconciliation().catch(() => setReconciliation(null));
     }
   }, [accountId, session]);
@@ -268,13 +282,20 @@ export default function Dashboard() {
     const merchant = String(form.get("merchant") ?? "");
     const amountCents = toCents(String(form.get("amount") ?? ""));
     await submit(async () => {
-      await api(`/api/accounts/${accountId}/card-authorizations`, {
-        method: "POST",
-        body: JSON.stringify({ merchant, amountCents, externalAuthId: `auth-${crypto.randomUUID()}` }),
-      });
+      if (stripeConfigured) {
+        await api(`/api/accounts/${accountId}/stripe-card-authorizations`, {
+          method: "POST",
+          body: JSON.stringify({ merchant, amountCents, requestId: crypto.randomUUID() }),
+        });
+      } else {
+        await api(`/api/accounts/${accountId}/card-authorizations`, {
+          method: "POST",
+          body: JSON.stringify({ merchant, amountCents, externalAuthId: `auth-${crypto.randomUUID()}` }),
+        });
+      }
       formElement.reset();
       await refreshAll();
-    }, "Card authorization placed.");
+    }, stripeConfigured ? "Stripe test authorization placed." : "Simulated card authorization placed.");
   }
 
   async function settleHold(hold: CardHold) {
@@ -286,11 +307,19 @@ export default function Dashboard() {
       return;
     }
     await submit(async () => {
+      const stripeBacked = hold.externalAuthId.startsWith("pi_");
+      if (stripeBacked) {
+        const capture = await api<{ amountCents: number }>(`/api/accounts/${accountId}/stripe-card-holds/${hold.id}`, {
+          method: "POST",
+          body: JSON.stringify({ action: "capture", amountCents }),
+        });
+        amountCents = capture.amountCents;
+      }
       const settlementEvent = {
         holdId: hold.id,
         amountCents,
-        provider: "demo-processor",
-        externalEventId: `settlement-${crypto.randomUUID()}`,
+        provider: stripeBacked ? "stripe-payments" : "demo-processor",
+        externalEventId: stripeBacked ? `capture-${hold.externalAuthId}` : `settlement-${crypto.randomUUID()}`,
       };
       const result = await api<{ duplicate: boolean }>(`/api/accounts/${accountId}/card-settlements`, {
         method: "POST",
@@ -315,9 +344,20 @@ export default function Dashboard() {
 
   async function reverseHold(hold: CardHold) {
     await submit(async () => {
+      const stripeBacked = hold.externalAuthId.startsWith("pi_");
+      if (stripeBacked) {
+        await api(`/api/accounts/${accountId}/stripe-card-holds/${hold.id}`, {
+          method: "POST",
+          body: JSON.stringify({ action: "refund" }),
+        });
+      }
       await api(`/api/accounts/${accountId}/card-reversals`, {
         method: "POST",
-        body: JSON.stringify({ holdId: hold.id, provider: "demo-processor", externalEventId: `reversal-${crypto.randomUUID()}` }),
+        body: JSON.stringify({
+          holdId: hold.id,
+          provider: stripeBacked ? "stripe-payments" : "demo-processor",
+          externalEventId: stripeBacked ? `refund-${hold.externalAuthId}` : `reversal-${crypto.randomUUID()}`,
+        }),
       });
       await refreshAll();
     }, "Card purchase reversed.");
@@ -530,11 +570,16 @@ export default function Dashboard() {
             </section>
 
             <section className="panel">
+              <div className="section-title"><div><h2>Stripe Payments test mode</h2><p>Card actions use Stripe manual capture, then capture on settlement and refund on reversal.</p></div></div>
+              <p>{stripeConfigured ? "Stripe test mode is connected. Payments use Stripe's pm_card_visa test method; no real money is moved." : "Stripe is not configured, so card actions use the local simulation."}</p>
+            </section>
+
+            <section className="panel">
               <div className="section-title"><div><h2>Card authorizations</h2><p>Holds reduce available funds. Settlement replaces the hold with the final charge.</p></div><div className="section-actions">{lastSettlementEvent && <button className="button secondary" disabled={busy} onClick={() => void replayLastSettlement()}>Replay same settlement event</button>}<span className="quiet">Holds: {balance ? dollars(balance.cardHoldsCents, currency) : "—"}</span></div></div>
               {holds.length === 0 ? <p className="empty-state">No card activity yet.</p> : (
                 <div className="table-wrap"><table><thead><tr><th>Merchant</th><th>Authorized</th><th>Settled</th><th>Status</th><th>Actions</th></tr></thead><tbody>
                   {holds.map((hold) => <tr key={hold.id}>
-                    <td>{hold.merchant}<small>{dateTime(hold.createdAt)}</small></td>
+                    <td>{hold.merchant}<small>{hold.externalAuthId.startsWith("pi_") ? "Stripe Payments test" : "Simulated"} · {dateTime(hold.createdAt)}</small></td>
                     <td>{dollars(hold.amountCents, currency)}</td>
                     <td>{hold.settledAmountCents === null ? "—" : dollars(hold.settledAmountCents, currency)}</td>
                     <td><span className={`status status-${hold.reversed ? "returned" : hold.status}`}>{hold.reversed ? "Reversed" : hold.status}</span></td>
@@ -576,6 +621,15 @@ export default function Dashboard() {
               <Summary label="Mismatched" value={reconciliation?.summary.mismatched ?? "—"} />
               <Summary label="Missing from account" value={reconciliation?.summary.externalOnly ?? "—"} />
               <Summary label="Missing externally" value={reconciliation?.summary.internalOnly ?? "—"} />
+            </section>
+
+            <section className="panel">
+              <div className="section-title"><div><h2>Stripe event deliveries</h2><p>Signed webhook receipts for this account. Repeated deliveries increment the count and never post another ledger entry.</p></div><button className="button secondary" disabled={busy} onClick={() => void refreshReconciliation().catch((cause) => setError(cause instanceof Error ? cause.message : "Refresh failed."))}>Refresh events</button></div>
+              {providerEvents.length === 0 ? <p className="empty-state">No Stripe events received yet. Set up the local Stripe listener to populate this log.</p> : (
+                <div className="table-wrap"><table><thead><tr><th>Event</th><th>Type</th><th>First received</th><th>Deliveries</th></tr></thead><tbody>
+                  {providerEvents.map((event) => <tr key={event.id}><td>{event.id}</td><td>{event.type}</td><td>{dateTime(event.firstReceivedAt)}</td><td>{event.deliveryCount}</td></tr>)}
+                </tbody></table></div>
+              )}
             </section>
 
             <section className="form-grid operations-forms">

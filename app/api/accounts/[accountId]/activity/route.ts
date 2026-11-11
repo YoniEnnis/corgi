@@ -25,6 +25,7 @@ export async function GET(_request: Request, { params }: RouteProps) {
 
   return Response.json({
     entries,
+    stripeConfigured: Boolean(process.env.STRIPE_SECRET_KEY?.startsWith("sk_test_")),
     cardHolds: holds.map((hold) => ({ ...hold, reversed: hold.settlementEntryId ? reversedSettlementIds.has(hold.settlementEntryId) : false })),
     payments,
   });
