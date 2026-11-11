@@ -1,0 +1,2 @@
+ALTER TABLE "card_holds" ADD COLUMN "settlement_entry_id" uuid;--> statement-breakpoint
+ALTER TABLE "card_holds" ADD CONSTRAINT "card_holds_settlement_entry_id_ledger_entries_id_fk" FOREIGN KEY ("settlement_entry_id") REFERENCES "public"."ledger_entries"("id") ON DELETE no action ON UPDATE no action;
