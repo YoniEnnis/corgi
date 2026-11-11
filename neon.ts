@@ -9,6 +9,10 @@ export default defineConfig({
       // Default branch: no overrides, uses project defaults
       return {};
     }
+    if (branch.name === "staging") {
+      // Keep the Vercel Preview database branch without an expiration date.
+      return {};
+    }
     if (!branch.exists) {
       // New non-default branches: auto-expire
       // Run `neon checkout <name>` to create a new branch with these settings
