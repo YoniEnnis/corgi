@@ -69,7 +69,7 @@ td small { display: block; margin-top: 4px; color: var(--muted); font-size: 9px;
 .status { display: inline-block; padding: 4px 7px; border-radius: 3px; background: #edf2ee; color: #4c6153; font-size: 9px; text-transform: capitalize; white-space: nowrap; }
 .status-open, .status-pending, .status-external_only { background: #f6f0df; color: #7a6729; }
 .status-settled, .status-completed, .status-matched { background: #e9f2eb; color: #3d6b4b; }
-.status-returned, .status-released, .status-mismatched, .status-mismatch_suggested { background: #f7eae6; color: #874d3d; }
+.status-returned, .status-released, .status-failed, .status-mismatched, .status-mismatch_suggested { background: #f7eae6; color: #874d3d; }
 .summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .summary-card { padding: 15px 17px; display: grid; gap: 9px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 .summary-card span { color: var(--muted); font-size: 10px; }

@@ -24,7 +24,7 @@ export const ledgerEntryType = pgEnum("ledger_entry_type", [
 ]);
 
 export const holdStatus = pgEnum("hold_status", ["open", "settled", "released"]);
-export const paymentStatus = pgEnum("payment_status", ["pending", "completed", "returned"]);
+export const paymentStatus = pgEnum("payment_status", ["pending", "completed", "returned", "failed"]);
 export const eventStatus = pgEnum("event_status", ["processed", "rejected"]);
 export const reconciliationActionType = pgEnum("reconciliation_action_type", ["manual_match", "correction"]);
 
@@ -85,6 +85,9 @@ export const outboundPayments = pgTable("outbound_payments", {
   amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
   status: paymentStatus("status").notNull().default("pending"),
   idempotencyKey: varchar("idempotency_key", { length: 180 }).notNull().unique(),
+  plaidAuthorizationId: varchar("plaid_authorization_id", { length: 180 }),
+  plaidTransferId: varchar("plaid_transfer_id", { length: 180 }),
+  plaidStatus: varchar("plaid_status", { length: 40 }),
   completedEntryId: uuid("completed_entry_id").references(() => ledgerEntries.id),
   returnedEntryId: uuid("returned_entry_id").references(() => ledgerEntries.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -92,7 +95,21 @@ export const outboundPayments = pgTable("outbound_payments", {
   returnedAt: timestamp("returned_at", { withTimezone: true }),
 }, (table) => [
   index("outbound_payments_account_status_idx").on(table.accountId, table.status),
+  uniqueIndex("outbound_payments_plaid_transfer_unique").on(table.plaidTransferId),
 ]);
+
+// Sandbox bank access tokens are encrypted before they are persisted. The
+// encryption key is held separately in the app environment.
+export const plaidConnections = pgTable("plaid_connections", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  accountId: uuid("account_id").notNull().unique().references(() => businessAccounts.id),
+  accessTokenEncrypted: text("access_token_encrypted").notNull(),
+  plaidAccountId: varchar("plaid_account_id", { length: 180 }).notNull(),
+  institutionName: varchar("institution_name", { length: 160 }).notNull(),
+  accountName: varchar("account_name", { length: 160 }).notNull(),
+  accountMask: varchar("account_mask", { length: 8 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // One row per provider event. Re-delivery increments deliveryCount without
 // creating another ledger entry, making duplicate delivery visible to operations.
