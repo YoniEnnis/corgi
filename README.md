@@ -1,5 +1,24 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+
+
+## Some notes:
+
+
+I started with a basic application without any sandbox and implemented the core functionality: adding money, using a card, and sending payments.
+
+Vercel was recommended to me by a friend a while ago, and Neon works well with it, so that's what I used.
+
+Then, I added the operations section, where transactions can be confirmed.
+
+Once everything was working, I moved on to integrating the sandboxes.
+
+After some research with Codex, Stripe and Plaid were recommended: Stripe for card operations and Plaid for transactions.
+
+I integrated both, making some database changes along the way.
+
+
+
 ## Getting Started
 
 First, run the development server:
