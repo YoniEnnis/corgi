@@ -34,7 +34,9 @@ type Payment = {
   id: string;
   recipient: string;
   amountCents: number;
-  status: "pending" | "completed" | "returned";
+  status: "pending" | "completed" | "returned" | "failed";
+  plaidTransferId: string | null;
+  plaidStatus: string | null;
   createdAt: string;
 };
 type SettlementEvent = { holdId: string; amountCents: number; provider: string; externalEventId: string };
@@ -61,7 +63,14 @@ type Reconciliation = {
   externalRecords: ReconciliationRow[];
   internalOnly: LedgerEntry[];
 };
-type ProviderEvent = { id: string; type: string; deliveryCount: number; firstReceivedAt: string; lastReceivedAt: string };
+type ProviderEvent = { id: string; provider: string; type: string; deliveryCount: number; firstReceivedAt: string; lastReceivedAt: string };
+type PlaidConnectionState = {
+  configured: boolean;
+  connected: boolean;
+  connection: { institutionName: string; accountName: string; accountMask: string | null; createdAt: string } | null;
+  ledgerBalance: { name: string; available: string; pending: string } | null;
+  ledgerError: string | null;
+};
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -101,6 +110,7 @@ export default function Dashboard() {
   const [holds, setHolds] = useState<CardHold[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [stripeConfigured, setStripeConfigured] = useState(false);
+  const [plaidConnection, setPlaidConnection] = useState<PlaidConnectionState | null>(null);
   const [reconciliation, setReconciliation] = useState<Reconciliation | null>(null);
   const [providerEvents, setProviderEvents] = useState<ProviderEvent[]>([]);
   const [view, setView] = useState<"owner" | "operations">("owner");
@@ -153,6 +163,7 @@ export default function Dashboard() {
       setHolds([]);
       setPayments([]);
       setStripeConfigured(false);
+      setPlaidConnection(null);
       setReconciliation(null);
       setProviderEvents([]);
     } catch (cause) {
@@ -166,11 +177,13 @@ export default function Dashboard() {
       api<{ balances: Balance }>(`/api/accounts/${id}/balance`),
       api<{ entries: LedgerEntry[]; cardHolds: CardHold[]; payments: Payment[]; stripeConfigured: boolean }>(`/api/accounts/${id}/activity`),
     ]);
+    const plaidData = await api<PlaidConnectionState>(`/api/accounts/${id}/plaid-connection`);
     setBalance(balanceData.balances);
     setEntries(activityData.entries);
     setHolds(activityData.cardHolds);
     setPayments(activityData.payments);
     setStripeConfigured(activityData.stripeConfigured);
+    setPlaidConnection(plaidData);
   }
 
   async function refreshReconciliation(id = accountId) {
@@ -209,6 +222,7 @@ export default function Dashboard() {
       setHolds([]);
       setPayments([]);
       setStripeConfigured(false);
+      setPlaidConnection(null);
       setReconciliation(null);
       setProviderEvents([]);
       return;
@@ -369,15 +383,50 @@ export default function Dashboard() {
     const form = new FormData(formElement);
     const recipient = String(form.get("recipient") ?? "");
     const amountCents = toCents(String(form.get("amount") ?? ""));
+    const successMessage = plaidConnection?.connected
+      ? "Plaid Sandbox transfer created; funds reserved."
+      : "Payment created and funds reserved.";
     await submit(async () => {
-      await api(`/api/accounts/${accountId}/payments`, {
+      const result = await api<{ plaidConnected?: boolean; providerError?: string }>(`/api/accounts/${accountId}/payments`, {
         method: "POST",
         headers: { "Idempotency-Key": `payment-${crypto.randomUUID()}` },
         body: JSON.stringify({ recipient, amountCents }),
       });
       formElement.reset();
       await refreshAll();
-    }, "Payment created and funds reserved.");
+      if (result.providerError) throw new Error("Payment is reserved, but Plaid could not create the transfer: " + result.providerError);
+    }, successMessage);
+  }
+
+  async function connectPlaidSandbox() {
+    await submit(async () => {
+      await api(`/api/accounts/${accountId}/plaid-connection`, { method: "POST" });
+      const data = await api<PlaidConnectionState>(`/api/accounts/${accountId}/plaid-connection`);
+      setPlaidConnection(data);
+    }, "Plaid Sandbox bank account connected.");
+  }
+
+  async function retryPlaidTransfer(payment: Payment) {
+    await submit(async () => {
+      let requestError: Error | null = null;
+      try {
+        await api(`/api/accounts/${accountId}/payments/${payment.id}/plaid-transfer`, { method: "POST" });
+      } catch (cause) {
+        requestError = cause instanceof Error ? cause : new Error("Could not create the Plaid transfer.");
+      }
+      await refreshAll();
+      if (requestError) throw requestError;
+    }, "Plaid Sandbox transfer created.");
+  }
+
+  async function simulatePlaidEvent(payment: Payment, eventType: "posted" | "settled" | "returned") {
+    await submit(async () => {
+      await api(`/api/accounts/${accountId}/payments/${payment.id}/plaid-events`, {
+        method: "POST",
+        body: JSON.stringify({ eventType }),
+      });
+      await refreshAll();
+    }, eventType === "posted" ? "Plaid transfer posted." : eventType === "settled" ? "Plaid transfer settled and the ledger was updated." : "Plaid transfer returned and the ledger was updated.");
   }
 
   async function updatePayment(payment: Payment, status: "completed" | "returned") {
@@ -562,7 +611,7 @@ export default function Dashboard() {
 
               <form className="panel form-panel" onSubmit={createPayment}>
                 <h2>Send a payment</h2>
-                <p>Pending payments reserve funds until their status changes.</p>
+                <p>{plaidConnection?.connected ? "Plaid Sandbox sends the payout to the connected test bank. Recipient is used as the payment memo." : "Pending payments reserve funds until their status changes."}</p>
                 <label>Recipient<input name="recipient" placeholder="Acme Supplies" required maxLength={160} /></label>
                 <label>Amount<input name="amount" type="number" min="0.01" step="0.01" placeholder="25.00" required /></label>
                 <button className="button primary" disabled={busy}>Create payment</button>
@@ -572,6 +621,22 @@ export default function Dashboard() {
             <section className="panel">
               <div className="section-title"><div><h2>Stripe Payments test mode</h2><p>Card actions use Stripe manual capture, then capture on settlement and refund on reversal.</p></div></div>
               <p>{stripeConfigured ? "Stripe test mode is connected. Payments use Stripe's pm_card_visa test method; no real money is moved." : "Stripe is not configured, so card actions use the local simulation."}</p>
+            </section>
+
+            <section className="panel">
+              <div className="section-title"><div><h2>Plaid Transfer Sandbox</h2><p>Connect a fake bank account for outbound ACH payment testing.</p></div></div>
+              {plaidConnection?.connected && plaidConnection.connection ? (
+                <p>Connected to {plaidConnection.connection.institutionName}: {plaidConnection.connection.accountName}{plaidConnection.connection.accountMask ? " ending in " + plaidConnection.connection.accountMask : ""}.</p>
+              ) : (
+                <>
+                  <p>{plaidConnection?.configured ? "Plaid Sandbox is configured. Connecting creates a fictional First Platypus Bank account; no real money moves." : "Plaid Sandbox credentials are not available to the app yet."}</p>
+                  <button className="button secondary" disabled={busy || !plaidConnection?.configured} onClick={() => void connectPlaidSandbox()}>Connect sandbox bank</button>
+                </>
+              )}
+              {plaidConnection?.ledgerBalance && (
+                <p>Plaid payout ledger ({plaidConnection.ledgerBalance.name}): {dollars(Math.round(Number(plaidConnection.ledgerBalance.available) * 100), currency)} available, {dollars(Math.round(Number(plaidConnection.ledgerBalance.pending) * 100), currency)} pending. This is separate from the business account balance above.</p>
+              )}
+              {plaidConnection?.ledgerError && <p>Plaid payout ledger balance could not be read: {plaidConnection.ledgerError}</p>}
             </section>
 
             <section className="panel">
@@ -593,12 +658,30 @@ export default function Dashboard() {
             </section>
 
             <section className="panel">
-              <div className="section-title"><div><h2>Outbound payments</h2><p>Mark simulated payment events as completed or returned.</p></div><span className="quiet">Reserved: {balance ? dollars(balance.pendingPaymentsCents, currency) : "—"}</span></div>
+              <div className="section-title"><div><h2>Outbound payments</h2><p>{plaidConnection?.connected ? "Advance Plaid Sandbox transfers through their provider events." : "Mark simulated payment events as completed or returned."}</p></div><span className="quiet">Reserved: {balance ? dollars(balance.pendingPaymentsCents, currency) : "—"}</span></div>
               {payments.length === 0 ? <p className="empty-state">No outbound payments yet.</p> : (
-                <div className="table-wrap"><table><thead><tr><th>Recipient</th><th>Amount</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>
+                <div className="table-wrap"><table><thead><tr><th>Recipient / memo</th><th>Amount</th><th>Status</th><th>Provider</th><th>Created</th><th>Actions</th></tr></thead><tbody>
                   {payments.map((payment) => <tr key={payment.id}>
-                    <td>{payment.recipient}</td><td>{dollars(payment.amountCents, currency)}</td><td><span className={`status status-${payment.status}`}>{payment.status}</span></td><td>{dateTime(payment.createdAt)}</td>
-                    <td className="actions-cell">{payment.status === "pending" && <><button className="button secondary" disabled={busy} onClick={() => void updatePayment(payment, "completed")}>Mark completed</button><button className="button plain" disabled={busy} onClick={() => void updatePayment(payment, "returned")}>Return</button></>}{payment.status === "completed" && <button className="button secondary" disabled={busy} onClick={() => void updatePayment(payment, "returned")}>Mark returned</button>}</td>
+                    <td>{payment.recipient}</td>
+                    <td>{dollars(payment.amountCents, currency)}</td>
+                    <td><span className={`status status-${payment.status}`}>{payment.status}</span></td>
+                    <td>{payment.plaidTransferId || payment.plaidStatus
+                      ? "Plaid Sandbox: " + (payment.plaidStatus ?? "pending")
+                      : plaidConnection?.connected ? "Not submitted" : "Local simulation"}</td>
+                    <td>{dateTime(payment.createdAt)}</td>
+                    <td className="actions-cell">
+                      {payment.plaidTransferId ? (
+                        <>
+                          {payment.plaidStatus === "pending" && <button className="button secondary" disabled={busy} onClick={() => void simulatePlaidEvent(payment, "posted")}>Simulate posted</button>}
+                          {payment.plaidStatus === "posted" && <><button className="button secondary" disabled={busy} onClick={() => void simulatePlaidEvent(payment, "settled")}>Simulate settled</button><button className="button plain" disabled={busy} onClick={() => void simulatePlaidEvent(payment, "returned")}>Simulate return</button></>}
+                          {payment.plaidStatus === "settled" && payment.status === "completed" && <button className="button secondary" disabled={busy} onClick={() => void simulatePlaidEvent(payment, "returned")}>Simulate return</button>}
+                        </>
+                      ) : plaidConnection?.connected && payment.status === "pending" ? (
+                        <button className="button secondary" disabled={busy} onClick={() => void retryPlaidTransfer(payment)}>Create Plaid transfer</button>
+                      ) : (
+                        <>{payment.status === "pending" && <><button className="button secondary" disabled={busy} onClick={() => void updatePayment(payment, "completed")}>Mark completed</button><button className="button plain" disabled={busy} onClick={() => void updatePayment(payment, "returned")}>Return</button></>}{payment.status === "completed" && <button className="button secondary" disabled={busy} onClick={() => void updatePayment(payment, "returned")}>Mark returned</button>}</>
+                      )}
+                    </td>
                   </tr>)}
                 </tbody></table></div>
               )}
@@ -624,10 +707,10 @@ export default function Dashboard() {
             </section>
 
             <section className="panel">
-              <div className="section-title"><div><h2>Stripe event deliveries</h2><p>Signed webhook receipts for this account. Repeated deliveries increment the count and never post another ledger entry.</p></div><button className="button secondary" disabled={busy} onClick={() => void refreshReconciliation().catch((cause) => setError(cause instanceof Error ? cause.message : "Refresh failed."))}>Refresh events</button></div>
-              {providerEvents.length === 0 ? <p className="empty-state">No Stripe events received yet. Set up the local Stripe listener to populate this log.</p> : (
-                <div className="table-wrap"><table><thead><tr><th>Event</th><th>Type</th><th>First received</th><th>Deliveries</th></tr></thead><tbody>
-                  {providerEvents.map((event) => <tr key={event.id}><td>{event.id}</td><td>{event.type}</td><td>{dateTime(event.firstReceivedAt)}</td><td>{event.deliveryCount}</td></tr>)}
+              <div className="section-title"><div><h2>Provider event deliveries</h2><p>Stripe webhook receipts and Plaid Transfer status events for this account.</p></div><button className="button secondary" disabled={busy} onClick={() => void refreshReconciliation().catch((cause) => setError(cause instanceof Error ? cause.message : "Refresh failed."))}>Refresh events</button></div>
+              {providerEvents.length === 0 ? <p className="empty-state">No provider events received yet. Stripe webhook receipts appear when the local listener is running; Plaid events appear after a transfer status is simulated.</p> : (
+                <div className="table-wrap"><table><thead><tr><th>Provider</th><th>Event</th><th>Type</th><th>First received</th><th>Deliveries</th></tr></thead><tbody>
+                  {providerEvents.map((event) => <tr key={event.provider + event.id}><td>{event.provider}</td><td>{event.id}</td><td>{event.type}</td><td>{dateTime(event.firstReceivedAt)}</td><td>{event.deliveryCount}</td></tr>)}
                 </tbody></table></div>
               )}
             </section>

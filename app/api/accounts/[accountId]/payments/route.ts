@@ -2,6 +2,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { businessAccounts, cardHolds, ledgerEntries, outboundPayments } from "@/lib/db/schema";
 import { requireRoles } from "@/lib/auth";
+import { createPlaidTransferIfConnected } from "@/lib/plaid-transfers";
 
 type RouteProps = { params: Promise<{ accountId: string }> };
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -103,5 +104,20 @@ export async function POST(request: Request, { params }: RouteProps) {
   });
 
   const { status, ...bodyResult } = result;
+  if ("payment" in bodyResult && (status === 200 || status === 201)) {
+    try {
+      const providerResult = await createPlaidTransferIfConnected(accountId, bodyResult.payment.id);
+      return Response.json({
+        ...bodyResult,
+        payment: providerResult.payment,
+        plaidConnected: providerResult.connected,
+      }, { status });
+    } catch (cause) {
+      return Response.json({
+        ...bodyResult,
+        providerError: cause instanceof Error ? cause.message : "Could not create the Plaid Sandbox transfer.",
+      }, { status });
+    }
+  }
   return Response.json(bodyResult, { status });
 }

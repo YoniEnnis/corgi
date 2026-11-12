@@ -37,4 +37,4 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 ## Integration status and decisions
 
-See [integration status and simulated behavior](docs/integrations.md) and the [dated decision log](docs/decision-log.md). Stripe Payments test mode is wired for card activity; Plaid Transfer and external funding remain unconnected.
+See [integration status and simulated behavior](docs/integrations.md) and the [dated decision log](docs/decision-log.md). Stripe Payments test mode is wired for card activity. Plaid Transfer Sandbox is wired for outbound ACH transfer creation and status simulation.
