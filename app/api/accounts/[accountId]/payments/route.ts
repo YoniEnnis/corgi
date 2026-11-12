@@ -104,7 +104,7 @@ export async function POST(request: Request, { params }: RouteProps) {
   });
 
   const { status, ...bodyResult } = result;
-  if ("payment" in bodyResult && (status === 200 || status === 201)) {
+  if ("payment" in bodyResult && bodyResult.payment && (status === 200 || status === 201)) {
     try {
       const providerResult = await createPlaidTransferIfConnected(accountId, bodyResult.payment.id);
       return Response.json({
